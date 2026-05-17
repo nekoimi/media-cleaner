@@ -25,6 +25,6 @@ jobs:
         run: pyinstaller --onefile --windowed --name media-cleaner main.py
 
       - name: Upload release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/media-cleaner.exe
