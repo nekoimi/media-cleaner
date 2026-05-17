@@ -169,6 +169,7 @@ class VideoCleanerGUI:
         def worker():
             try:
                 self.cleaner = VideoCleaner(progress_callback=progress_callback)
+                self.root.after(0, lambda: self.result_label.config(text="正在扫描空文件夹..."))
                 logger.info("开始扫描空文件夹: %s", self.target_dir.get())
 
                 empty_folders = self.cleaner.find_empty_folders(self.target_dir.get())
@@ -210,6 +211,7 @@ class VideoCleanerGUI:
         def worker():
             try:
                 self.cleaner = VideoCleaner(progress_callback=progress_callback)
+                self.root.after(0, lambda: self.result_label.config(text="正在扫描重复视频..."))
                 logger.info("开始扫描重复视频: %s", self.target_dir.get())
 
                 duplicates = self.cleaner.find_duplicate_videos(self.target_dir.get())
@@ -256,6 +258,7 @@ class VideoCleanerGUI:
         def worker():
             try:
                 self.cleaner = VideoCleaner(progress_callback=progress_callback)
+                self.root.after(0, lambda: self.result_label.config(text="正在扫描需要重命名的视频..."))
                 logger.info("开始扫描需要重命名的视频: %s", self.target_dir.get())
 
                 files_to_rename = self.cleaner.scan_videos_to_rename(self.target_dir.get())
@@ -344,6 +347,7 @@ class VideoCleanerGUI:
         def worker():
             try:
                 self.cleaner = VideoCleaner(progress_callback=progress_callback)
+                self.root.after(0, lambda: self.result_label.config(text="正在扫描视频用于生成STRM..."))
                 logger.info("开始扫描视频用于生成STRM: %s, 目标: %s", self.target_dir.get(), target)
 
                 items = self.cleaner.scan_videos_for_strm(self.target_dir.get(), prefix, target)
