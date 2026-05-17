@@ -1,0 +1,7 @@
+[project]
+name = "media-cleaner"
+version = "0.1.0"
+description = "媒体文件清理工具 - 删除空文件夹和查找重复视频"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = []
