@@ -21,10 +21,12 @@ class VideoCleanerGUI:
         self.root.resizable(True, True)
 
         self.target_dir = tk.StringVar()
+        self.strm_prefix = tk.StringVar()
+        self.strm_target = tk.StringVar()
         self.cleaner = None
         self.current_thread = None
 
-        self.current_mode = None  # "empty_folders" or "duplicates"
+        self.current_mode = None  # "empty_folders", "duplicates", "rename", "strm"
         self.scanned_data = []  # 存储当前扫描的数据
         self.selected_items = set()  # 选中的项
 
@@ -57,7 +59,22 @@ class VideoCleanerGUI:
 
         ttk.Button(btn_frame, text="扫描空文件夹", command=self._scan_empty_folders).pack(side=tk.LEFT, padx=5, pady=5)
         ttk.Button(btn_frame, text="查找重复视频", command=self._find_duplicates).pack(side=tk.LEFT, padx=5, pady=5)
-        ttk.Button(btn_frame, text="重命名视频", command=self._rename_videos).pack(fill=tk.X, padx=5, pady=5)
+        ttk.Button(btn_frame, text="重命名视频", command=self._rename_videos).pack(side=tk.LEFT, padx=5, pady=5)
+
+        strm_frame = ttk.Frame(actions_frame)
+        strm_frame.pack(fill=tk.X)
+        ttk.Button(strm_frame, text="生成STRM", command=self._scan_strm).pack(side=tk.LEFT, padx=5, pady=5)
+        strm_entry = ttk.Entry(strm_frame, textvariable=self.strm_prefix)
+        strm_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
+        self.strm_prefix.set("")
+        strm_entry.insert(0, "输入路径前缀，如 http://example.com/")
+        strm_entry.bind("<FocusIn>", lambda e: strm_entry.delete(0, tk.END) if strm_entry.get() == "输入路径前缀，如 http://example.com/" else None)
+        strm_entry.bind("<FocusOut>", lambda e: strm_entry.insert(0, "输入路径前缀，如 http://example.com/") if not strm_entry.get() else None)
+
+        strm_target_frame = ttk.Frame(actions_frame)
+        strm_target_frame.pack(fill=tk.X)
+        ttk.Button(strm_target_frame, text="选择移动目标", command=self._select_strm_target).pack(side=tk.LEFT, padx=5, pady=5)
+        ttk.Entry(strm_target_frame, textvariable=self.strm_target, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
 
         ttk.Separator(main_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
 
@@ -92,6 +109,7 @@ class VideoCleanerGUI:
         ttk.Button(result_buttons, text="打开选中项所在文件夹", command=self._open_selected_folders).pack(side=tk.LEFT, padx=5)
         ttk.Button(result_buttons, text="删除选中项", command=self._delete_selected).pack(side=tk.LEFT, padx=5)
         ttk.Button(result_buttons, text="重命名选中项", command=self._execute_rename).pack(side=tk.LEFT, padx=5)
+        ttk.Button(result_buttons, text="生成选中项STRM", command=self._execute_strm).pack(side=tk.LEFT, padx=5)
         ttk.Button(result_buttons, text="全选", command=self._select_all).pack(side=tk.LEFT, padx=5)
         ttk.Button(result_buttons, text="清空选择", command=self._clear_selection).pack(side=tk.LEFT, padx=5)
 
@@ -115,6 +133,11 @@ class VideoCleanerGUI:
         if path:
             self.target_dir.set(path)
 
+    def _select_strm_target(self):
+        path = filedialog.askdirectory(title="选择视频移动目标文件夹")
+        if path:
+            self.strm_target.set(path)
+
     def _start_operation(self):
         if self.current_thread and self.current_thread.is_alive():
             return False
@@ -123,6 +146,7 @@ class VideoCleanerGUI:
         self.progress.start(50)
         self.tree.delete(*self.tree.get_children())
         self.tree.column("new_name", width=0, stretch=False)
+        self.tree.heading("new_name", text="新文件名")
         self.current_mode = None
         self.scanned_data = []
         return True
@@ -299,6 +323,96 @@ class VideoCleanerGUI:
                 self.tree.delete(item_id)
         self.result_label.config(text=f"已重命名 {len(renamed)} 个文件")
 
+    def _scan_strm(self):
+        if not self.target_dir.get():
+            logger.warning("请先选择目标目录")
+            return
+
+        prefix = self.strm_prefix.get()
+        if not prefix or prefix == "输入路径前缀，如 http://example.com/":
+            messagebox.showwarning("提示", "请先输入路径前缀")
+            return
+
+        if not self._start_operation():
+            return
+
+        def progress_callback(message: str, current: int, total: int):
+            self.root.after(0, lambda: self.result_label.config(text=message))
+
+        target = self.strm_target.get()
+
+        def worker():
+            try:
+                self.cleaner = VideoCleaner(progress_callback=progress_callback)
+                logger.info("开始扫描视频用于生成STRM: %s, 目标: %s", self.target_dir.get(), target)
+
+                items = self.cleaner.scan_videos_for_strm(self.target_dir.get(), prefix, target)
+
+                self.root.after(0, lambda: self._display_strm_preview(items))
+            except Exception as e:
+                logger.error("扫描STRM失败: %s", e)
+                self.root.after(0, self._end_operation)
+
+        self.current_thread = threading.Thread(target=worker, daemon=True)
+        self.current_thread.start()
+
+    def _display_strm_preview(self, items: List[Dict]):
+        self._end_operation()
+
+        self.current_mode = "strm"
+        self.scanned_data = items
+
+        self.tree.column("new_name", width=300, stretch=True)
+        self.tree.heading("new_name", text="STRM内容")
+
+        if not items:
+            self.result_label.config(text="没有找到视频文件")
+        else:
+            self.result_label.config(text=f"发现 {len(items)} 个视频可生成STRM")
+            for item in items:
+                self.tree.insert("", tk.END, values=(item["video_name"], item["content"]), tags=(item["video_path"],))
+
+        logger.info("扫描完成，发现 %d 个视频可生成STRM", len(items))
+
+    def _execute_strm(self):
+        if not self.scanned_data or self.current_mode != "strm":
+            return
+
+        selected_paths = self._get_selected_paths()
+        if not selected_paths:
+            messagebox.showinfo("提示", "请先选择要生成STRM的项")
+            return
+
+        items = [item for item in self.scanned_data if item["video_path"] in selected_paths]
+
+        move_video = bool(self.strm_target.get())
+        msg = f"确定要为 {len(items)} 个视频生成 .strm 文件吗？"
+        if move_video:
+            msg += f"\n\n生成后视频将移动到：{self.strm_target.get()}"
+
+        confirm = messagebox.askyesno("确认生成STRM", msg)
+        if not confirm:
+            return
+
+        def worker():
+            try:
+                generated = self.cleaner.generate_strm_files(items, dry_run=False, move_video=move_video)
+                self.root.after(0, lambda: self._refresh_strm_tree(generated))
+                logger.info("STRM生成完成，共 %d 个文件", len(generated))
+            except Exception as e:
+                logger.error("STRM生成错误: %s", e)
+
+        self.current_thread = threading.Thread(target=worker, daemon=True)
+        self.current_thread.start()
+
+    def _refresh_strm_tree(self, generated: List[Dict]):
+        generated_paths = {item["video_path"] for item in generated}
+        for item_id in self.tree.get_children():
+            tags = self.tree.item(item_id)["tags"]
+            if tags and tags[0] in generated_paths:
+                self.tree.delete(item_id)
+        self.result_label.config(text=f"已生成 {len(generated)} 个STRM文件")
+
     def _get_selected_paths(self) -> List[str]:
         """获取选中项的路径。"""
         selected_paths = []
@@ -309,7 +423,7 @@ class VideoCleanerGUI:
             tag = tags[0]
             if self.current_mode == "empty_folders":
                 selected_paths.append(tag)
-            elif self.current_mode in ("duplicates", "rename"):
+            elif self.current_mode in ("duplicates", "rename", "strm"):
                 # 文件路径是绝对路径，分组标题（如 ABC-123）不是
                 if os.path.isabs(tag):
                     selected_paths.append(tag)
@@ -411,6 +525,8 @@ class VideoCleanerGUI:
                 menu.add_command(label="删除", command=self._delete_selected)
             elif self.current_mode == "rename":
                 menu.add_command(label="重命名", command=self._execute_rename)
+            elif self.current_mode == "strm":
+                menu.add_command(label="生成STRM", command=self._execute_strm)
 
             menu.post(event.x_root, event.y_root)
 
