@@ -8,17 +8,49 @@ import subprocess
 import platform
 from typing import List, Dict
 from cleaner import VideoCleaner
+from jellyfin import JellyfinMigrator
 from log import setup_logging, get_logger
 
 logger = get_logger("main")
+
+
+class ToolTip:
+    """鼠标悬浮提示"""
+
+    def __init__(self, widget):
+        self.widget = widget
+        self.tip_window = None
+        self.text = ""
+
+    def show(self, text, x, y):
+        if text == self.text and self.tip_window:
+            return
+        self.hide()
+        self.text = text
+        self.tip_window = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x + 16}+{y + 10}")
+        label = tk.Label(tw, text=text, background="#ffffe0", relief=tk.SOLID, borderwidth=1, font=("", 9))
+        label.pack()
+
+    def hide(self):
+        if self.tip_window:
+            self.tip_window.destroy()
+            self.tip_window = None
+            self.text = ""
 
 
 class VideoCleanerGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("媒体文件清理工具")
-        self.root.geometry("900x700")
         self.root.resizable(True, True)
+        self.root.update_idletasks()
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        x = (screen_width - 900) // 2
+        y = (screen_height - 700) // 2
+        self.root.geometry(f"900x700+{x}+{y}")
 
         self.target_dir = tk.StringVar()
         self.strm_prefix = tk.StringVar()
@@ -30,6 +62,12 @@ class VideoCleanerGUI:
         self.scanned_data = []  # 存储当前扫描的数据
         self.selected_items = set()  # 选中的项
 
+        # Jellyfin 迁移
+        self.old_db_path = tk.StringVar()
+        self.new_db_path = tk.StringVar()
+        self.jellyfin_migrator = None
+        self.mapping_data = []
+
         self._setup_ui()
         setup_logging(self.root, self.log_text)
 
@@ -39,9 +77,22 @@ class VideoCleanerGUI:
         main_frame = ttk.Frame(self.root, padding=10)
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(main_frame, text="目标目录:").pack(anchor=tk.W, **padding)
+        # Notebook with two tabs
+        self.notebook = ttk.Notebook(main_frame)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
 
-        dir_frame = ttk.Frame(main_frame)
+        tab_cleaner = ttk.Frame(self.notebook)
+        tab_jellyfin = ttk.Frame(self.notebook)
+        self.notebook.add(tab_cleaner, text="媒体文件清理")
+        self.notebook.add(tab_jellyfin, text="Jellyfin 迁移")
+
+        # Tab 2: Jellyfin 迁移
+        self._setup_jellyfin_tab(tab_jellyfin)
+
+        # === Tab 1: 媒体文件清理 ===
+        ttk.Label(tab_cleaner, text="目标目录:").pack(anchor=tk.W, **padding)
+
+        dir_frame = ttk.Frame(tab_cleaner)
         dir_frame.pack(fill=tk.X, **padding)
 
         dir_entry = ttk.Entry(dir_frame, textvariable=self.target_dir)
@@ -49,9 +100,9 @@ class VideoCleanerGUI:
 
         ttk.Button(dir_frame, text="选择目录", command=self._select_directory).pack(side=tk.LEFT, padx=5)
 
-        ttk.Separator(main_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
+        ttk.Separator(tab_cleaner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
 
-        actions_frame = ttk.LabelFrame(main_frame, text="操作", padding=5)
+        actions_frame = ttk.LabelFrame(tab_cleaner, text="操作", padding=5)
         actions_frame.pack(fill=tk.X, **padding)
 
         btn_frame = ttk.Frame(actions_frame)
@@ -76,9 +127,9 @@ class VideoCleanerGUI:
         ttk.Button(strm_target_frame, text="选择移动目标", command=self._select_strm_target).pack(side=tk.LEFT, padx=5, pady=5)
         ttk.Entry(strm_target_frame, textvariable=self.strm_target, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
 
-        ttk.Separator(main_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
+        ttk.Separator(tab_cleaner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
 
-        results_frame = ttk.LabelFrame(main_frame, text="扫描结果", padding=5)
+        results_frame = ttk.LabelFrame(tab_cleaner, text="扫描结果", padding=5)
         results_frame.pack(fill=tk.BOTH, expand=True, **padding)
 
         self.result_label = ttk.Label(results_frame, text="等待扫描...")
@@ -127,6 +178,236 @@ class VideoCleanerGUI:
 
         self.progress = ttk.Progressbar(main_frame, mode="determinate")
         self.progress.pack(fill=tk.X, **padding)
+
+    def _setup_jellyfin_tab(self, parent):
+        padding = {"padx": 10, "pady": 5}
+
+        # 数据库选择区域
+        db_frame = ttk.LabelFrame(parent, text="数据库文件", padding=5)
+        db_frame.pack(fill=tk.X, **padding)
+
+        old_db_row = ttk.Frame(db_frame)
+        old_db_row.pack(fill=tk.X, pady=2)
+        ttk.Label(old_db_row, text="旧数据库 (MP4):", width=16).pack(side=tk.LEFT)
+        ttk.Entry(old_db_row, textvariable=self.old_db_path).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        ttk.Button(old_db_row, text="选择文件", command=self._select_old_db).pack(side=tk.LEFT)
+
+        new_db_row = ttk.Frame(db_frame)
+        new_db_row.pack(fill=tk.X, pady=2)
+        ttk.Label(new_db_row, text="新数据库 (STRM):", width=16).pack(side=tk.LEFT)
+        ttk.Entry(new_db_row, textvariable=self.new_db_path).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        ttk.Button(new_db_row, text="选择文件", command=self._select_new_db).pack(side=tk.LEFT)
+
+        # 操作按钮
+        btn_frame = ttk.Frame(parent)
+        btn_frame.pack(fill=tk.X, **padding)
+        ttk.Button(btn_frame, text="读取数据库", command=self._read_databases).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="执行迁移", command=self._execute_migration).pack(side=tk.LEFT, padx=5)
+
+        # 映射结果
+        results_frame = ttk.LabelFrame(parent, text="映射结果", padding=5)
+        results_frame.pack(fill=tk.BOTH, expand=True, **padding)
+
+        self.jellyfin_result_label = ttk.Label(results_frame, text="请选择数据库文件后点击「读取数据库」")
+        self.jellyfin_result_label.pack(anchor=tk.W, pady=(0, 5))
+
+        tree_container = ttk.Frame(results_frame)
+        tree_container.pack(fill=tk.BOTH, expand=True)
+
+        columns = ("code", "old_path", "new_path", "favorite", "played", "play_count", "position", "status")
+        self.jellyfin_tree = ttk.Treeview(tree_container, columns=columns, show="headings", selectmode="extended")
+
+        headers = {
+            "code": ("番号", 100),
+            "old_path": ("旧路径", 250),
+            "new_path": ("新路径", 250),
+            "favorite": ("收藏", 50),
+            "played": ("已观看", 50),
+            "play_count": ("播放次数", 70),
+            "position": ("播放进度", 80),
+            "status": ("状态", 80),
+        }
+        for col, (text, width) in headers.items():
+            self.jellyfin_tree.heading(col, text=text)
+            self.jellyfin_tree.column(col, width=width, anchor=tk.W)
+
+        scrollbar = ttk.Scrollbar(tree_container, orient=tk.VERTICAL, command=self.jellyfin_tree.yview)
+        self.jellyfin_tree.configure(yscrollcommand=scrollbar.set)
+        self.jellyfin_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 路径列悬浮提示
+        self._jellyfin_tooltip = ToolTip(self.jellyfin_tree)
+        self._jellyfin_tooltip_path_cols = {"old_path", "new_path"}
+        self.jellyfin_tree.bind("<Motion>", self._on_jellyfin_tree_motion)
+        self.jellyfin_tree.bind("<Leave>", lambda e: self._jellyfin_tooltip.hide())
+
+    def _on_jellyfin_tree_motion(self, event):
+        region = self.jellyfin_tree.identify("region", event.x, event.y)
+        if region != "cell":
+            self._jellyfin_tooltip.hide()
+            return
+        col = self.jellyfin_tree.identify_column(event.x)
+        col_id = self.jellyfin_tree["columns"][int(col[1:]) - 1]
+        if col_id not in self._jellyfin_tooltip_path_cols:
+            self._jellyfin_tooltip.hide()
+            return
+        item_id = self.jellyfin_tree.identify_row(event.y)
+        if not item_id:
+            self._jellyfin_tooltip.hide()
+            return
+        values = self.jellyfin_tree.item(item_id, "values")
+        col_index = list(self.jellyfin_tree["columns"]).index(col_id)
+        text = values[col_index] if col_index < len(values) else ""
+        if text:
+            self._jellyfin_tooltip.show(text, event.x_root, event.y_root)
+        else:
+            self._jellyfin_tooltip.hide()
+
+    def _select_old_db(self):
+        path = filedialog.askopenfilename(
+            title="选择旧数据库文件",
+            filetypes=[("SQLite 数据库", "*.db"), ("所有文件", "*.*")]
+        )
+        if path:
+            self.old_db_path.set(path)
+
+    def _select_new_db(self):
+        path = filedialog.askopenfilename(
+            title="选择新数据库文件",
+            filetypes=[("SQLite 数据库", "*.db"), ("所有文件", "*.*")]
+        )
+        if path:
+            self.new_db_path.set(path)
+
+    def _read_databases(self):
+        old_path = self.old_db_path.get().strip()
+        new_path = self.new_db_path.get().strip()
+        if not old_path or not new_path:
+            messagebox.showwarning("提示", "请先选择旧数据库和新数据库文件")
+            return
+        if not os.path.exists(old_path):
+            messagebox.showerror("错误", f"旧数据库文件不存在: {old_path}")
+            return
+        if not os.path.exists(new_path):
+            messagebox.showerror("错误", f"新数据库文件不存在: {new_path}")
+            return
+
+        if self.current_thread and self.current_thread.is_alive():
+            messagebox.showwarning("提示", "有操作正在进行，请等待完成")
+            return
+
+        self.progress["mode"] = "determinate"
+        self.progress["value"] = 0
+        self.jellyfin_result_label.config(text="正在读取数据库...")
+        self.jellyfin_tree.delete(*self.jellyfin_tree.get_children())
+        self.mapping_data = []
+
+        def make_callback():
+            def cb(info):
+                if isinstance(info, tuple):
+                    current, total, msg = info
+                    if total > 0:
+                        pct = int(current / total * 100)
+                        self.root.after(0, lambda p=pct: self.progress.configure(value=p))
+                    self.root.after(0, lambda m=msg: self.jellyfin_result_label.config(text=m))
+                else:
+                    self.root.after(0, lambda: self.jellyfin_result_label.config(text=str(info)))
+            return cb
+
+        def task():
+            try:
+                self.jellyfin_migrator = JellyfinMigrator()
+
+                old_data = self.jellyfin_migrator.read_old_db(old_path, make_callback())
+                new_data = self.jellyfin_migrator.read_new_db(new_path, make_callback())
+                mapping = self.jellyfin_migrator.build_mapping(old_data, new_data)
+
+                self.root.after(0, lambda: self._display_mapping(mapping))
+            except Exception as e:
+                logger.error("读取数据库失败: %s", e)
+                self.root.after(0, lambda: messagebox.showerror("错误", f"读取数据库失败: {e}"))
+                self.root.after(0, lambda: self.jellyfin_result_label.config(text="读取失败"))
+            finally:
+                self.root.after(0, lambda: self.progress.configure(value=100))
+
+        self.current_thread = threading.Thread(target=task, daemon=True)
+        self.current_thread.start()
+
+    def _display_mapping(self, mapping):
+        self.mapping_data = mapping
+        self.jellyfin_tree.delete(*self.jellyfin_tree.get_children())
+
+        for item in mapping:
+            ud = item.get("user_data") or {}
+            status_text = {"matched": "可迁移", "old_only": "仅旧库", "new_only": "仅新库"}.get(item["status"], item["status"])
+
+            self.jellyfin_tree.insert("", tk.END, values=(
+                item["code"],
+                item.get("old_path") or "",
+                item.get("new_path") or "",
+                "是" if ud.get("IsFavorite") else "",
+                "是" if ud.get("Played") else "",
+                ud.get("PlayCount") or 0,
+                ud.get("PlaybackPositionTicks") or 0,
+                status_text,
+            ))
+
+        matched = sum(1 for m in mapping if m["status"] == "matched")
+        old_only = sum(1 for m in mapping if m["status"] == "old_only")
+        new_only = sum(1 for m in mapping if m["status"] == "new_only")
+        self.jellyfin_result_label.config(
+            text=f"读取完成: {matched} 条可迁移, {old_only} 条仅旧库, {new_only} 条仅新库"
+        )
+
+    def _execute_migration(self):
+        if not self.mapping_data:
+            messagebox.showwarning("提示", "请先读取数据库")
+            return
+
+        matched = [m for m in self.mapping_data if m["status"] == "matched"]
+        if not matched:
+            messagebox.showwarning("提示", "没有可迁移的匹配记录")
+            return
+
+        new_path = self.new_db_path.get().strip()
+        if not messagebox.askyesno("确认迁移", f"即将向新数据库写入 {len(matched)} 条 UserData 记录。\n\n请确保已备份数据库文件: {new_path}\n\n是否继续?"):
+            return
+
+        if self.current_thread and self.current_thread.is_alive():
+            messagebox.showwarning("提示", "有操作正在进行，请等待完成")
+            return
+
+        self.progress["mode"] = "determinate"
+        self.progress["value"] = 0
+        self.jellyfin_result_label.config(text="正在执行迁移...")
+
+        def make_callback():
+            def cb(info):
+                if isinstance(info, tuple):
+                    current, total, msg = info
+                    if total > 0:
+                        pct = int(current / total * 100)
+                        self.root.after(0, lambda p=pct: self.progress.configure(value=p))
+                    self.root.after(0, lambda m=msg: self.jellyfin_result_label.config(text=m))
+                else:
+                    self.root.after(0, lambda: self.jellyfin_result_label.config(text=str(info)))
+            return cb
+
+        def task():
+            try:
+                migrated = self.jellyfin_migrator.migrate_userdata(
+                    new_path, self.mapping_data, make_callback()
+                )
+                self.root.after(0, lambda: messagebox.showinfo("完成", f"迁移完成: 成功 {migrated} 条"))
+            except Exception as e:
+                logger.error("迁移失败: %s", e)
+                self.root.after(0, lambda: messagebox.showerror("错误", f"迁移失败: {e}"))
+            finally:
+                self.root.after(0, lambda: self.progress.configure(value=100))
+
+        self.current_thread = threading.Thread(target=task, daemon=True)
+        self.current_thread.start()
 
     def _select_directory(self):
         path = filedialog.askdirectory(title="选择视频目录")
