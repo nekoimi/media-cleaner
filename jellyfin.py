@@ -45,7 +45,7 @@ class JellyfinMigrator:
         try:
             sql = """
                 SELECT b.Id, b.Path, b.Name,
-                       u.IsFavorite, u.Played, u.PlayCount,
+                       u.UserId, u.CustomDataKey, u.IsFavorite, u.Played, u.PlayCount,
                        u.PlaybackPositionTicks, u.LastPlayedDate
                 FROM BaseItems b
                 JOIN UserData u ON b.Id = u.ItemId
@@ -68,6 +68,8 @@ class JellyfinMigrator:
                     continue
 
                 user_data = {field: row[field] for field in USERDATA_FIELDS}
+                user_data["UserId"] = row["UserId"]
+                user_data["CustomDataKey"] = row["CustomDataKey"]
                 result[code] = {
                     "old_item_id": row["Id"],
                     "path": path,
@@ -201,57 +203,77 @@ class JellyfinMigrator:
 
         conn = sqlite3.connect(db_path)
         migrated = 0
+        skipped = 0
         try:
             for i, item in enumerate(matched):
-                old_item_id = item["old_item_id"]
                 new_item_id = item["new_item_id"]
                 user_data = item["user_data"]
+                user_id = user_data.get("UserId")
 
-                # 用 old_item_id 在新库的 UserData 中查找记录
-                # （新库从旧库来，BaseItems.ItemId 被重新扫描为新的，但 UserData.ItemId 仍是旧的）
-                row = conn.execute(
-                    "SELECT UserId FROM UserData WHERE ItemId = ? LIMIT 1",
-                    (old_item_id,)
-                ).fetchone()
-
-                if not row:
-                    logger.warning("新库中未找到 old_item_id=%s 的 UserData, 跳过 %s", old_item_id, item["code"])
+                if not user_id:
+                    logger.warning("跳过 %s: 缺少 UserId", item["code"])
+                    skipped += 1
                     continue
 
-                user_id = row[0]
+                # 检查新库中是否已有该记录
+                existing = conn.execute(
+                    "SELECT 1 FROM UserData WHERE ItemId = ? AND UserId = ?",
+                    (new_item_id, user_id)
+                ).fetchone()
 
-                # 将 ItemId 从 old 更新为 new，同时更新用户状态
-                conn.execute(
-                    """UPDATE UserData SET
-                        ItemId = ?,
-                        IsFavorite = ?,
-                        Played = ?,
-                        PlayCount = ?,
-                        PlaybackPositionTicks = ?,
-                        LastPlayedDate = ?
-                    WHERE ItemId = ? AND UserId = ?""",
-                    (
-                        new_item_id,
-                        user_data.get("IsFavorite"),
-                        user_data.get("Played"),
-                        user_data.get("PlayCount"),
-                        user_data.get("PlaybackPositionTicks"),
-                        user_data.get("LastPlayedDate"),
-                        old_item_id,
-                        user_id,
+                if existing:
+                    # 已有记录，UPDATE
+                    conn.execute(
+                        """UPDATE UserData SET
+                            IsFavorite = ?,
+                            Played = ?,
+                            PlayCount = ?,
+                            PlaybackPositionTicks = ?,
+                            LastPlayedDate = ?
+                        WHERE ItemId = ? AND UserId = ?""",
+                        (
+                            user_data.get("IsFavorite"),
+                            user_data.get("Played"),
+                            user_data.get("PlayCount"),
+                            user_data.get("PlaybackPositionTicks"),
+                            user_data.get("LastPlayedDate"),
+                            new_item_id,
+                            user_id,
+                        )
                     )
-                )
-                migrated += 1
+                    logger.info("已更新 %s (已有 UserData)", item["code"])
+                else:
+                    # 无记录，INSERT
+                    conn.execute(
+                        """INSERT INTO UserData
+                            (ItemId, UserId, CustomDataKey, IsFavorite, Played, PlayCount,
+                             PlaybackPositionTicks, LastPlayedDate)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            new_item_id,
+                            user_id,
+                            user_data.get("CustomDataKey"),
+                            user_data.get("IsFavorite"),
+                            user_data.get("Played"),
+                            user_data.get("PlayCount"),
+                            user_data.get("PlaybackPositionTicks"),
+                            user_data.get("LastPlayedDate"),
+                        )
+                    )
+                    logger.info("已插入 %s (新建 UserData)", item["code"])
 
+                migrated += 1
                 if progress_callback and (i + 1) % 10 == 0:
                     progress_callback((i + 1, total, f"迁移进度: {i + 1}/{total}"))
 
             conn.commit()
             if progress_callback:
-                progress_callback((total, total, f"迁移完成: 成功 {migrated}/{total} 条"))
-            logger.info("迁移完成: %d/%d 条成功", migrated, len(matched))
+                progress_callback((total, total, f"迁移完成: 成功 {migrated}/{total} 条, 跳过 {skipped} 条"))
+            logger.info("迁移完成: %d/%d 条成功, %d 条跳过", migrated, len(matched), skipped)
         except Exception as e:
             conn.rollback()
+            import traceback
+            traceback.print_exc()
             logger.error("迁移失败: %s", e)
             raise
         finally:

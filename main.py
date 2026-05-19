@@ -243,25 +243,31 @@ class VideoCleanerGUI:
         self.jellyfin_tree.bind("<Leave>", lambda e: self._jellyfin_tooltip.hide())
 
     def _on_jellyfin_tree_motion(self, event):
-        region = self.jellyfin_tree.identify("region", event.x, event.y)
-        if region != "cell":
-            self._jellyfin_tooltip.hide()
-            return
-        col = self.jellyfin_tree.identify_column(event.x)
-        col_id = self.jellyfin_tree["columns"][int(col[1:]) - 1]
-        if col_id not in self._jellyfin_tooltip_path_cols:
-            self._jellyfin_tooltip.hide()
-            return
-        item_id = self.jellyfin_tree.identify_row(event.y)
-        if not item_id:
-            self._jellyfin_tooltip.hide()
-            return
-        values = self.jellyfin_tree.item(item_id, "values")
-        col_index = list(self.jellyfin_tree["columns"]).index(col_id)
-        text = values[col_index] if col_index < len(values) else ""
-        if text:
-            self._jellyfin_tooltip.show(text, event.x_root, event.y_root)
-        else:
+        try:
+            region = self.jellyfin_tree.identify("region", event.x, event.y)
+            if region != "cell":
+                self._jellyfin_tooltip.hide()
+                return
+            col = self.jellyfin_tree.identify_column(event.x)
+            if not col:
+                self._jellyfin_tooltip.hide()
+                return
+            col_id = self.jellyfin_tree["columns"][int(col[1:]) - 1]
+            if col_id not in self._jellyfin_tooltip_path_cols:
+                self._jellyfin_tooltip.hide()
+                return
+            item_id = self.jellyfin_tree.identify_row(event.y)
+            if not item_id or not self.jellyfin_tree.exists(item_id):
+                self._jellyfin_tooltip.hide()
+                return
+            values = self.jellyfin_tree.item(item_id, "values")
+            col_index = list(self.jellyfin_tree["columns"]).index(col_id)
+            text = values[col_index] if col_index < len(values) else ""
+            if text:
+                self._jellyfin_tooltip.show(text, event.x_root, event.y_root)
+            else:
+                self._jellyfin_tooltip.hide()
+        except tk.TclError:
             self._jellyfin_tooltip.hide()
 
     def _select_old_db(self):
@@ -325,8 +331,10 @@ class VideoCleanerGUI:
 
                 self.root.after(0, lambda: self._display_mapping(mapping))
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 logger.error("读取数据库失败: %s", e)
-                self.root.after(0, lambda: messagebox.showerror("错误", f"读取数据库失败: {e}"))
+                self.root.after(0, lambda e=e: messagebox.showerror("错误", f"读取数据库失败: {e}"))
                 self.root.after(0, lambda: self.jellyfin_result_label.config(text="读取失败"))
             finally:
                 self.root.after(0, lambda: self.progress.configure(value=100))
@@ -401,8 +409,10 @@ class VideoCleanerGUI:
                 )
                 self.root.after(0, lambda: messagebox.showinfo("完成", f"迁移完成: 成功 {migrated} 条"))
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 logger.error("迁移失败: %s", e)
-                self.root.after(0, lambda: messagebox.showerror("错误", f"迁移失败: {e}"))
+                self.root.after(0, lambda e=e: messagebox.showerror("错误", f"迁移失败: {e}"))
             finally:
                 self.root.after(0, lambda: self.progress.configure(value=100))
 
